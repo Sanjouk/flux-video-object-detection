@@ -14,7 +14,7 @@ output_frame = None
 lock = threading.Lock()
 
 def receive_and_process():
-    """Thread 1 : Reçoit le flux TCP, applique YOLO et met à jour l'image globale"""
+    """Thread 1 : Reçoit le flux TCP, applique YOLO (1 frame/4) et met à jour l'image globale"""
     global output_frame
 
     # 1. Chargement de YOLO
@@ -26,6 +26,9 @@ def receive_and_process():
 
     data = b""
     payload_size = struct.calcsize('>I')
+
+    frame_count = 0
+    annotated_frame = None
 
     while True:
         try:
@@ -55,9 +58,12 @@ def receive_and_process():
             if frame is None or frame.size == 0:
                 continue
 
-            # Inférence YOLO
-            results = model(frame, imgsz=320, verbose=False)
-            annotated_frame = results[0].plot()
+            frame_count += 1
+
+            # Inférence YOLO : exécutée uniquement 1 frame sur 4 (ou au premier passage)
+            if frame_count % 4 == 0 or annotated_frame is None:
+                results = model(frame, imgsz=320, verbose=False, conf=0.50)
+                annotated_frame = results[0].plot()
 
             # Compression en JPEG pour la diffusion Web (qualité 60%)
             ret, buffer = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
@@ -123,5 +129,5 @@ if __name__ == '__main__':
     t.start()
 
     # 2. Lancement du serveur Web Flask sur le port 8000
-    # Accesible via http://<IP_DE_CE_PC>:8000 sur le réseau local
+    # Accessible via http://<IP_DE_CE_PC>:8000 sur le réseau local
     app.run(host='0.0.0.0', port=8000, debug=False)
