@@ -2,12 +2,18 @@ import socket
 import cv2
 import numpy as np
 import struct
+from ultralytics import YOLO
+
+model = YOLO('yolov8n.pt')
 
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect(('127.0.0.1', 5000))
+#client_socket.connect(('10.77.180.191', 5000))
+client_socket.connect(('10.77.180.142', 5000))
 
 data = b""
 payload_size = struct.calcsize('>I')
+frame_count = 0
+annotated_frame = None
 
 while True:
     # 1. Récupération des 4 octets indiquant la taille
@@ -33,7 +39,24 @@ while True:
 
     # 3. Décodage JPEG et affichage avec OpenCV
     frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-    cv2.imshow('Flux TCP Brut', frame)
+    if frame is not None:
+        frame_count += 1
+
+        # N'exécute YOLO que toutes les 3 images
+        if frame_count % 3 == 0:
+            # imgsz=320 accélère grandement l'inférence
+            results = model(frame, imgsz=320, verbose=False)
+            annotated_frame = results[0].plot()
+
+            if annotated_frame is not None:
+                cv2.imshow('Flux TCP + YOLO', annotated_frame)
+            else:
+                cv2.imshow('Flux TCP + YOLO', frame)
+
+        # 5. Affichage du résultat
+        cv2.imshow('Flux TCP + Détection YOLO', annotated_frame)
+
+    #cv2.imshow('Flux TCP Brut', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
