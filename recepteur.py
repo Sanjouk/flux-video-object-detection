@@ -98,7 +98,7 @@ def receive_frames():
         udp_socket.close()
 
 
-def run_detection(modele):
+def run_detection(model):
     """Execute YOLO sur le dernier frame disponible, sans mettre UDP en attente."""
     global detections
     processed_frame_id = 0
