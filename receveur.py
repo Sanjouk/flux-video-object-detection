@@ -44,17 +44,30 @@ def draw_detections(frame, current_detections):
         )
 
 def receive_frames():
-    """Recoit les frames UDP et publie toujours la plus recente pour le web."""
+    """Recoit les frames UDP, vide le buffer pour ne garder que la plus recente et la publie pour le web."""
     global latest_frame, latest_frame_id, output_frame, output_frame_id
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Un buffer court privilegie la fraicheur des frames a une latence croissante.
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
     udp_socket.bind((UDP_HOST, UDP_PORT))
+    udp_socket.setblocking(False)  # Permet le dépilement non-bloquant du buffer
 
     try:
         while True:
-            packet, _ = udp_socket.recvfrom(MAX_DATAGRAM_SIZE)
+            packet = None
+            
+            # Flush du buffer : dépile tous les paquets en attente pour ne garder que le dernier
+            while True:
+                try:
+                    data, _ = udp_socket.recvfrom(MAX_DATAGRAM_SIZE)
+                    packet = data
+                except BlockingIOError:
+                    break
+
+            if packet is None:
+                time.sleep(0.005)
+                continue
+
             try:
                 frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None or frame.size == 0:
@@ -412,7 +425,6 @@ def index():
             if(img.naturalWidth === 0 && okOnce){
                 const u = new URL(img.src, location.href);
                 u.searchParams.set('t', Date.now());
-                // ne recharge que si vraiment bloqué pour éviter de couper un flux MJPEG sain
             }
         }, 5000);
     </script>
