@@ -98,10 +98,9 @@ def receive_frames():
         udp_socket.close()
 
 
-def run_detection():
+def run_detection(modele):
     """Execute YOLO sur le dernier frame disponible, sans mettre UDP en attente."""
     global detections
-    model = YOLO('yolov8n.pt')
     processed_frame_id = 0
 
     while True:
@@ -440,9 +439,16 @@ def video_feed():
 
 
 if __name__ == '__main__':
+    print("Chargement et préparation du modèle YOLO...")
+    model_global = YOLO('yolov8n.pt')
+    
+    # Inférence à vide (dummy frame) pour forcer PyTorch à allouer la mémoire
+    dummy_frame = np.zeros((320, 320, 3), dtype=np.uint8)
+    model_global(dummy_frame, imgsz=320, verbose=False)
+    print("Modèle YOLO prêt ! Lancement des services...")
     # La reception et l'inference sont separees pour preserver une faible latence.
     threading.Thread(target=receive_frames, daemon=True).start()
-    threading.Thread(target=run_detection, daemon=True).start()
+    threading.Thread(target=run_detection,args=(model_global,), daemon=True).start()
 
     # Lancement du serveur Web Flask sur le port 8000
     # Accessible via http://<IP_DE_CE_PC>:8000 sur le réseau local
