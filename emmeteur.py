@@ -1,43 +1,37 @@
 import cv2
 import socket
 
-# Configuration du récepteur
-RECEIVER_IP = '10.77.180.142'  # Remplace par l'IP de la machine qui fait le traitement YOLO
+# 1. Utilise l'IP directe pour tester d'abord si le flux passe
+TARGET_IP = '10.180.183.191'  # Ou '10.180.183.255' pour le broadcast sous-réseau
 PORT = 5000
-MAX_UDP_SIZE = 65507  # Taille maximale du payload d'un paquet UDP
 
-# Initialisation de la socket UDP
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-# Ouverture de la webcam (0 = caméra intégrée/USB par défaut)
 cap = cv2.VideoCapture(0)
 
-# Réduction de la résolution pour limiter la bande passante et la taille des paquets
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# Réduction de la résolution à 480x360 pour alléger drastiquement les paquets UDP
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+
+print(f"Début de l'envoi vers {TARGET_IP}:{PORT}...")
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Compression en JPEG (qualité 50 % pour garantir que l'image reste légère)
-    encoded, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+    # Qualité 40% pour garantir un paquet sous les 15-20 Ko
+    encoded, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
     if not encoded:
         continue
 
     data = buffer.tobytes()
 
-    # Vérification que l'image ne dépasse pas la taille maximale autorisée en UDP
-    if len(data) > MAX_UDP_SIZE:
-        print(f"Avertissement : Frame trop lourde ({len(data)} octets), ignorée.")
-        continue
-
-    # Envoi direct du datagramme au récepteur
     try:
-        sock.sendto(data, (RECEIVER_IP, PORT))
+        sock.sendto(data, (TARGET_IP, PORT))
     except Exception as e:
-        print(f"Erreur lors de l'envoi : {e}")
+        print(f"Erreur d'envoi : {e}")
 
 cap.release()
 sock.close()

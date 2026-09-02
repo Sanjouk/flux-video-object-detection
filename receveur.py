@@ -14,51 +14,52 @@ output_frame = None
 lock = threading.Lock()
 
 def receive_and_process():
-    """Thread 1 : Reçoit le flux UDP, applique YOLO (1 frame/4) et met à jour l'image globale"""
     global output_frame
-
-    # 1. Chargement de YOLO
     model = YOLO('yolov8n.pt')
 
-    # 2. Création de la socket UDP
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # Augmentation du buffer de réception pour éviter de perdre des paquets au niveau de l'OS
-    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-    
-    # Écoute sur le port 5000 (là où la caméra/émetteur envoie les paquets)
     udp_socket.bind(('0.0.0.0', 5000))
+    
+    # Rend la socket non-bloquante pour pouvoir vider le buffer instantanément
+    udp_socket.setblocking(False)
 
     frame_count = 0
     annotated_frame = None
 
-    MAX_DATAGRAM_SIZE = 65535 # Taille maximale d'un paquet UDP
-
     while True:
-        try:
-            # Réception du paquet UDP complet directement
-            packet, _ = udp_socket.recvfrom(MAX_DATAGRAM_SIZE)
+        try :
+            packet = None
+            
+            # 1. Vidage du buffer : on lit tous les paquets en attente et on garde le tout dernier
+            while True:
+                try:
+                    data, _ = udp_socket.recvfrom(65535)
+                    packet = data  # Écrase les paquets obsolètes
+                except BlockingIOError:
+                    break  # Plus aucun paquet en attente dans le buffer
 
-            # Décodage JPEG
+            # Si aucune nouvelle image n'est arrivée, on attend un court instant
+            if packet is None:
+                time.sleep(0.005)
+                continue
+
+            # 2. Décodage de la frame la plus récente
             frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is None or frame.size == 0:
                 continue
 
             frame_count += 1
 
-            # Inférence YOLO (1 frame sur 4)
+            # 3. Inférence YOLO (1 frame sur 4)
             if frame_count % 4 == 0 or annotated_frame is None:
                 results = model(frame, imgsz=320, verbose=False)
                 annotated_frame = results[0].plot()
 
-            # Compression en JPEG pour Flask
+            # 4. Envoi vers Flask
             ret, buffer = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            if not ret:
-                continue
-
-            # Copie thread-safe
-            with lock:
-                output_frame = buffer.tobytes()
+            if ret:
+                with lock:
+                    output_frame = buffer.tobytes()
 
         except Exception as e:
             print(f"Erreur de réception UDP : {e}")
