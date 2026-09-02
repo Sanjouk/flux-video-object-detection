@@ -1,36 +1,43 @@
-import socket
 import cv2
-import struct
+import socket
 
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind(('0.0.0.0', 5000))
-server_socket.listen(1)
+# Configuration du récepteur
+RECEIVER_IP = '10.77.180.142'  # Remplace par l'IP de la machine qui fait le traitement YOLO
+PORT = 5000
+MAX_UDP_SIZE = 65507  # Taille maximale du payload d'un paquet UDP
 
-conn, addr = server_socket.accept()
-camera = cv2.VideoCapture(0)
+# Initialisation de la socket UDP
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-try:
-    if not camera.isOpened():
-        print("Erreur : Impossible d'accéder à la webcam")
-        exit()
-    while True:
-        ret, frame = camera.read()
-        if not ret:
-            break
+# Ouverture de la webcam (0 = caméra intégrée/USB par défaut)
+cap = cv2.VideoCapture(0)
 
-        # 1. Redimensionner l'image (ex: 480x360 au lieu de 1080p/720p)
-        frame = cv2.resize(frame, (480, 360))
+# Réduction de la résolution pour limiter la bande passante et la taille des paquets
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        # 2. Compresser le JPEG à 50% de qualité (au lieu de 95% par défaut)
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 50]
-        _, buffer = cv2.imencode('.jpg', frame, encode_param)
-        data = buffer.tobytes()
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-        # Envoi de la taille (4 octets, entier grand-boutiste) puis du buffer
-        size = struct.pack('>I', len(data))
-        conn.sendall(size + data)
+    # Compression en JPEG (qualité 50 % pour garantir que l'image reste légère)
+    encoded, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+    if not encoded:
+        continue
 
-finally:
-    camera.release()
-    conn.close()
-    server_socket.close()
+    data = buffer.tobytes()
+
+    # Vérification que l'image ne dépasse pas la taille maximale autorisée en UDP
+    if len(data) > MAX_UDP_SIZE:
+        print(f"Avertissement : Frame trop lourde ({len(data)} octets), ignorée.")
+        continue
+
+    # Envoi direct du datagramme au récepteur
+    try:
+        sock.sendto(data, (RECEIVER_IP, PORT))
+    except Exception as e:
+        print(f"Erreur lors de l'envoi : {e}")
+
+cap.release()
+sock.close()
