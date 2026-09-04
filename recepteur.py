@@ -1,3 +1,6 @@
+# recepteur.py : recoit le flux UDP de emeteur.py, detecte avec YOLOv8n, diffuse en MJPEG via Flask.
+# Architecture a 3 threads : reception UDP (receive_frames) + inference YOLO (run_detection) + serveur Flask.
+# Aucun thread ne bloque les autres : echange via variables globales protegees par `lock`.
 import socket
 import cv2
 import numpy as np
@@ -6,6 +9,7 @@ import time
 from ultralytics import YOLO
 from flask import Flask, Response, render_template_string
 
+# Serveur web : expose la page '/' et le flux MJPEG '/video_feed'.
 app = Flask(__name__)
 
 # Etat partage entre le recepteur UDP, YOLO et Flask.
@@ -15,7 +19,14 @@ latest_frame = None
 latest_frame_id = 0
 detections = []
 output_frame_id = 0
+# FPS affiches : frames UDP decodees/sec, incrustes sur l'image et exposes via /fps.
+fps_display = 0.0
+fps_last_update = 0.0
+# Compteur d'objets : MAJ par YOLO sous verrou, lu par /fps (meme fraicheur que FPS).
+nb_objets = 0
 
+# Config reseau : ecoute sur toutes les interfaces ; 1 datagramme max = 64 Ko - 1 (limite UDP).
+# JPEG_QUALITY regle la re-compression web, independante de la qualite d'envoi de l'emetteur.
 UDP_HOST = '0.0.0.0'
 UDP_PORT = 5000
 MAX_DATAGRAM_SIZE = 65535
@@ -25,12 +36,17 @@ JPEG_QUALITY = 60
 def draw_detections(frame, current_detections):
     """Dessine les dernieres detections sur un nouveau frame."""
     for x1, y1, x2, y2, label, confidence in current_detections:
+        # Cadre vert autour de l'objet detecte (epaisseur 2 px).
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 136), 2)
+        # Etiquette affichee, ex. "person 87%" : confiance formatee en pourcentage sans decimales.
         text = f'{label} {confidence:.0%}'
+        # Mesure le texte pour dimensionner le fond de l'etiquette juste derriere.
         (text_width, text_height), baseline = cv2.getTextSize(
             text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
         )
+        # Colle l'etiquette au-dessus de la box, rabattue vers l'interieur si trop pres du haut de l'image.
         label_top = max(y1, text_height + baseline + 6)
+        # Fond plein de l'etiquette : garde le texte lisible sur image claire comme sombre.
         cv2.rectangle(
             frame,
             (x1, label_top - text_height - baseline - 6),
@@ -38,6 +54,7 @@ def draw_detections(frame, current_detections):
             (0, 255, 136),
             -1,
         )
+        # Texte sombre antialiase, leger decalage (+4 px) pour ne pas toucher le bord du fond.
         cv2.putText(
             frame, text, (x1 + 4, label_top - baseline - 3),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (10, 12, 16), 1, cv2.LINE_AA
@@ -45,13 +62,20 @@ def draw_detections(frame, current_detections):
 
 def receive_frames():
     """Recoit les frames UDP, vide le buffer pour ne garder que la plus recente et la publie pour le web."""
-    global latest_frame, latest_frame_id, output_frame, output_frame_id
+    global latest_frame, latest_frame_id, output_frame, output_frame_id, fps_display, fps_last_update
 
+    # Socket UDP d'ecoute : recoit les datagrammes JPEG envoyes par emeteur.py.
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Buffer de reception elargi (256 Ko) pour absorber les rafales sans jeter trop de frames.
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Re-bind immediat du port apres un redemarrage.
     udp_socket.bind((UDP_HOST, UDP_PORT))
     udp_socket.setblocking(False)  # Permet le dépilement non-bloquant du buffer
 
+    # Boucle infinie en thread dedie : ne doit jamais bloquer YOLO ni Flask.
+    # Compteurs FPS : fenetre glissante d'1 s sur les frames effectivement decodees.
+    fps_count = 0
+    fps_t0 = time.monotonic()
     try:
         while True:
             packet = None
@@ -64,34 +88,54 @@ def receive_frames():
                 except BlockingIOError:
                     break
 
+            # Aucun paquet en attente : micro-pause anti-boucle-chaude, puis reessai.
             if packet is None:
                 time.sleep(0.005)
                 continue
 
             try:
+                # Decode le payload JPEG en image OpenCV (BGR) directement depuis les bytes recus.
                 frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None or frame.size == 0:
                     continue
 
+                # Publie la frame fraiche pour YOLO + snapshot des detections, sous verrou.
                 with lock:
                     latest_frame = frame
                     latest_frame_id += 1
                     current_detections = list(detections)
 
                 # Les boxes sont ceux de la derniere inference, mais l'image est toujours recente.
+                # On dessine sur une copie : latest_frame reste intacte pour la prochaine inference YOLO.
                 web_frame = frame.copy()
                 draw_detections(web_frame, current_detections)
+                # FPS en haut a droite : le chip HTML "REC" occupe le coin haut-gauche et masquait l'ancien texte.
+                fps_text = f'{fps_display:.0f} FPS - {len(current_detections)} obj'
+                (fps_tw, fps_th), fps_bl = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                fps_x, fps_y = web_frame.shape[1] - fps_tw - 18, 10  # marge de 10 px depuis le bord droit/haut
+                cv2.rectangle(web_frame, (fps_x - 8, fps_y), (fps_x + fps_tw + 8, fps_y + fps_th + fps_bl + 10), (10, 12, 16), -1)  # fond sombre, comme les etiquettes YOLO
+                cv2.putText(web_frame, fps_text, (fps_x, fps_y + fps_th + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 136), 2, cv2.LINE_AA)
+                # Re-encode pour le web (qualite 60) : reglage d'affichage, independant du JPEG reseau.
                 ret, buffer = cv2.imencode(
                     '.jpg', web_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
                 )
                 if not ret:
                     continue
 
+                # Publie la frame annotee pour le generateur MJPEG.
                 with lock:
                     output_frame = buffer.tobytes()
                     output_frame_id += 1
+                # MAJ FPS : fige la valeur a chaque fenetre d'1 s ecoulee, puis repart.
+                fps_count += 1
+                now = time.monotonic()
+                if now - fps_t0 >= 1.0:
+                    fps_display = fps_count / (now - fps_t0)
+                    fps_count, fps_t0, fps_last_update = 0, now, now
+            # Paquet corrompu / decode rate : on jette juste cette frame, le flux continue.
             except Exception as error:
                 app.logger.warning('Frame UDP ignoree: %s', error)
+    # Erreur socket (port occupe, reseau coupe) : log + sortie, le finally ferme le socket.
     except OSError as error:
         app.logger.exception('Reception UDP arretee: %s', error)
     finally:
@@ -100,14 +144,17 @@ def receive_frames():
 
 def run_detection(model):
     """Execute YOLO sur le dernier frame disponible, sans mettre UDP en attente."""
-    global detections
+    global detections, nb_objets
     processed_frame_id = 0
 
+    # Tourne a son rythme : traite uniquement la frame la plus recente, jamais la file entiere.
     while True:
         with lock:
+            # Anti-retraitement : pas de nouvelle frame depuis le dernier passage -> on attend.
             if latest_frame is None or latest_frame_id == processed_frame_id:
                 frame_to_process = None
             else:
+                # Copie sous verrou puis inference hors verrou : UDP et Flask ne sont jamais bloques.
                 frame_to_process = latest_frame.copy()
                 frame_id = latest_frame_id
 
@@ -116,34 +163,42 @@ def run_detection(model):
             continue
 
         try:
+            # imgsz=320 : compromis vitesse/precision (coherent avec le warmup du __main__) ; [0] = 1ere image du batch.
             result = model(frame_to_process, imgsz=320, verbose=False)[0]
             current_detections = []
             for box in result.boxes:
+                # Coordonnees pixels (haut-gauche -> bas-droit), rapatriees sur CPU puis en int pour OpenCV.
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                 class_id = int(box.cls[0].item())
+                # Stocke (box, label texte via result.names, score) : format consomme par draw_detections.
                 current_detections.append((
                     x1, y1, x2, y2,
                     result.names[class_id],
                     float(box.conf[0].item()),
                 ))
 
+            # Remplace atomiquement la liste : receive_frames lit toujours une liste coherente.
             with lock:
                 detections = current_detections
+                nb_objets = len(current_detections)
         except Exception as error:
             # Une frame invalide ne doit pas arreter le service video.
             app.logger.exception('Erreur YOLO: %s', error)
         finally:
+            # Marque la frame comme traitee meme en cas d'erreur : evite de boucler dessus.
             processed_frame_id = frame_id
 
 
 def generate_web_stream():
     """Générateur de flux HTTP MJPEG pour les clients web"""
+    # Retient la derniere frame envoyee pour ne streamer que les nouvelles (pas de doublons).
     last_sent_id = 0
     while True:
         with lock:
             frame_bytes = output_frame
             frame_id = output_frame_id
 
+        # Pas encore de frame, ou deja envoyee : on attend sans spammer le client.
         if frame_bytes is None or frame_id == last_sent_id:
             time.sleep(0.01)
             continue
@@ -155,6 +210,7 @@ def generate_web_stream():
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
+# Page HTML : un simple <img> qui consomme le flux MJPEG ci-dessous (+ overlays/panneaux statiques).
 @app.route('/')
 def index():
     """Page web affichant le flux vidéo - UI responsive moderne"""
@@ -165,7 +221,7 @@ def index():
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
-    <title>Relais YOLO — Live</title>
+    <title>Relais YOLO - Live</title>
     <style>
         :root{
             --bg:#0f1115;
@@ -246,17 +302,14 @@ def index():
         .video-wrap{
             position:relative;
             background:#07080a;
-            /* s'adapte à l'écran : ratio 4/3 natif, mais remplit sans déborder */
-            aspect-ratio: 4 / 3;
-            max-height: min(72vh, 760px);
-            display:grid; place-items:center;
+            width:100%; /* pleine largeur de la carte : plus de fond gris sur les cotes */
+            aspect-ratio: 4 / 3; /* repli avant la 1re frame, corrige en JS au ratio reel du flux */
             overflow:hidden;
         }
-        /* sur écrans larges 16:9, sur mobile on laisse respirer */
-        @media (min-width: 1100px){ .video-wrap{ aspect-ratio: 16 / 9; } }
         .video-wrap img{
+            position:absolute; inset:0;
             width:100%; height:100%;
-            object-fit:contain; /* jamais cropé, jamais déformé */
+            object-fit:contain; /* remplit exactement des que le ratio = ratio flux ; meme fond sinon */
             display:block;
             background:#07080a;
         }
@@ -317,7 +370,6 @@ def index():
             .panel{grid-column: span 12}
             .nav{padding-block:12px}
             .brand p{display:none}
-            .video-wrap{max-height: 62vh}
         }
         @media (max-width: 420px){
             .badges .badge.muted{display:none}
@@ -352,13 +404,15 @@ def index():
     <main>
         <div class="hero">
             <div>
-                <h2>Flux <span>en direct</span> — réseau local</h2>
+                <h2>Flux <span>en direct</span> - réseau local</h2>
                 <p>Interface responsive : le flux s'adapte à la taille de l'écran sans déformation.</p>
             </div>
             <div class="stats">
                 <span class="stat">UDP <b>:5000</b></span>
                 <span class="stat">HTTP <b>:8000</b></span>
                 <span class="stat">YOLO <b>v8n</b></span>
+                <span class="stat">FPS <b id="fps">–</b></span>
+                <span class="stat">Objets <b id="objets">0</b></span>
             </div>
         </div>
 
@@ -379,7 +433,7 @@ def index():
                 </div>
             </div>
             <div class="bar">
-                <div>Flux MJPEG en temps réel &middot; <strong>object-fit: contain</strong> &middot; recadrage auto selon l'écran</div>
+                <div>Flux MJPEG en temps réel &middot; <strong>ratio natif caméra</strong> &middot;</div>
                 <div class="stats">
                     <span class="stat" title="Ouvrir le flux brut"><a href="/video_feed" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">Ouvrir le flux brut &nearr;</a></span>
                 </div>
@@ -391,7 +445,7 @@ def index():
                 <h3>Astuces d'affichage</h3>
                 <p>
                     Sur mobile, pincez pour zoomer. Sur desktop, mettez en plein écran (<code>F11</code>).
-                    L'image garde toujours ses proportions — pas d'étirement, pas de crop.
+                    
                 </p>
             </div>
             <div class="panel">
@@ -413,17 +467,31 @@ def index():
         const img = document.getElementById('stream');
         const ph  = document.getElementById('ph');
         const res = document.getElementById('res');
+        const wrap = document.getElementById('wrap');
         let okOnce = false;
         img.addEventListener('load', () => {
             if(!okOnce){ ph.hidden = true; okOnce = true; }
-            if(img.naturalWidth) res.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' · MJPEG';
+            if(img.naturalWidth){ res.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' · MJPEG'; wrap.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight; }
         });
         img.addEventListener('error', () => { ph.hidden = false; });
+        // Badge FPS : interroge /fps chaque seconde (requete negligeable).
+        const fpsEl = document.getElementById('fps');
+        const objetsEl = document.getElementById('objets');
+        let retryAt = 0; // Prochaine reconnexion autorisee (anti-spam quand le serveur est down).
+        setInterval(async () => {
+            try {
+                const d = (await (await fetch('/fps', {cache: 'no-store'})).json());
+                fpsEl.textContent = d.fps; objetsEl.textContent = d.objets;
+            } catch (e) { /* /fps injoignable = recepteur coupe : relance le flux, throttle 5 s */
+                if (Date.now() > retryAt) { retryAt = Date.now() + 5000; img.src = '/video_feed?t=' + Date.now(); }
+            }
+        }, 1000);
         // Auto-retry discret si le flux coupe (cache-bust)
         setInterval(() => {
             if(img.naturalWidth === 0 && okOnce){
                 const u = new URL(img.src, location.href);
                 u.searchParams.set('t', Date.now());
+                img.src = u; // Rejoue la requete : sans cette ligne le retry ne faisait rien.
             }
         }, 5000);
     </script>
@@ -432,14 +500,24 @@ def index():
     ''')
 
 
+# Endpoint MJPEG : chaque `yield` envoie une image JPEG delimitee par `--frame`.
 @app.route('/video_feed')
 def video_feed():
     """Endpoint HTTP diffusant le flux vidéo"""
     return Response(generate_web_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+# FPS courant : 0 si le flux est coupe depuis plus de 2 s (evite une valeur fige).
+@app.route('/fps')
+def fps():
+    """FPS + objets detectes (0 si flux coupe depuis plus de 2 s)."""
+    frais = time.monotonic() - fps_last_update <= 2.0
+    return {'fps': round(fps_display, 1) if frais else 0.0, 'objets': nb_objets if frais else 0}
 
+
+# Point d'entree : warmup YOLO + 2 threads daemon + serveur Flask (appel bloquant).
 if __name__ == '__main__':
     print("Chargement et préparation du modèle YOLO...")
+    # Charge le modele nano (leger, temps reel) depuis le poids local versionne dans le repo.
     model_global = YOLO('yolov8n.pt')
     
     # Inférence à vide (dummy frame) pour forcer PyTorch à allouer la mémoire
