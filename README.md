@@ -39,9 +39,9 @@ pip install -r requirements.txt
 Une seule valeur à adapter : l'adresse IP du poste **récepteur**, dans `emeteur.py` (variable `TARGET_IP`).
 
 1. Sur le poste récepteur, exécuter `ipconfig` et noter l'**adresse IPv4** de l'interface connectée au réseau local.
-2. Recopier cette adresse dans `emeteur.py` :
+2. Recopier cette adresse dans la 8eme ligne `emeteur.py` :
    ```python
-   TARGET_IP = '192.168.x.x'  # IP du poste récepteur
+   TARGET_IP = 'x.x.x.x'  # IP du poste récepteur
    ```
 3. Rien à modifier dans `recepteur.py` (écoute sur toutes les interfaces, UDP `:5000`, web `:8000`).
 
