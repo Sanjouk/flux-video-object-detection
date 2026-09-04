@@ -2,7 +2,7 @@ import cv2
 import socket
 
 # 1. Utilise l'IP directe pour tester d'abord si le flux passe
-TARGET_IP = '10.180.183.191'  # Ou '10.180.183.255' pour le broadcast sous-réseau
+TARGET_IP = '10.18.5.147'  
 PORT = 5000
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

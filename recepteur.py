@@ -1,7 +1,6 @@
 import socket
 import cv2
 import numpy as np
-import struct
 import threading
 import time
 from ultralytics import YOLO
@@ -9,79 +8,151 @@ from flask import Flask, Response, render_template_string
 
 app = Flask(__name__)
 
-# Zone mémoire partagée sécurisée entre le thread TCP et le serveur Flask
+# Etat partage entre le recepteur UDP, YOLO et Flask.
 output_frame = None
 lock = threading.Lock()
+latest_frame = None
+latest_frame_id = 0
+detections = []
+output_frame_id = 0
 
-def receive_and_process():
-    global output_frame
-    model = YOLO('yolov8n.pt')
+UDP_HOST = '0.0.0.0'
+UDP_PORT = 5000
+MAX_DATAGRAM_SIZE = 65535
+JPEG_QUALITY = 60
+
+
+def draw_detections(frame, current_detections):
+    """Dessine les dernieres detections sur un nouveau frame."""
+    for x1, y1, x2, y2, label, confidence in current_detections:
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 136), 2)
+        text = f'{label} {confidence:.0%}'
+        (text_width, text_height), baseline = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        )
+        label_top = max(y1, text_height + baseline + 6)
+        cv2.rectangle(
+            frame,
+            (x1, label_top - text_height - baseline - 6),
+            (x1 + text_width + 8, label_top),
+            (0, 255, 136),
+            -1,
+        )
+        cv2.putText(
+            frame, text, (x1 + 4, label_top - baseline - 3),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (10, 12, 16), 1, cv2.LINE_AA
+        )
+
+def receive_frames():
+    """Recoit les frames UDP, vide le buffer pour ne garder que la plus recente et la publie pour le web."""
+    global latest_frame, latest_frame_id, output_frame, output_frame_id
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.bind(('0.0.0.0', 5000))
-    
-    # Rend la socket non-bloquante pour pouvoir vider le buffer instantanément
-    udp_socket.setblocking(False)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
+    udp_socket.bind((UDP_HOST, UDP_PORT))
+    udp_socket.setblocking(False)  # Permet le dépilement non-bloquant du buffer
 
-    frame_count = 0
-    annotated_frame = None
-
-    while True:
-        try :
+    try:
+        while True:
             packet = None
             
-            # 1. Vidage du buffer : on lit tous les paquets en attente et on garde le tout dernier
+            # Flush du buffer : dépile tous les paquets en attente pour ne garder que le dernier
             while True:
                 try:
-                    data, _ = udp_socket.recvfrom(65535)
-                    packet = data  # Écrase les paquets obsolètes
+                    data, _ = udp_socket.recvfrom(MAX_DATAGRAM_SIZE)
+                    packet = data
                 except BlockingIOError:
-                    break  # Plus aucun paquet en attente dans le buffer
+                    break
 
-            # Si aucune nouvelle image n'est arrivée, on attend un court instant
             if packet is None:
                 time.sleep(0.005)
                 continue
 
-            # 2. Décodage de la frame la plus récente
-            frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is None or frame.size == 0:
-                continue
+            try:
+                frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is None or frame.size == 0:
+                    continue
 
-            frame_count += 1
+                with lock:
+                    latest_frame = frame
+                    latest_frame_id += 1
+                    current_detections = list(detections)
 
-            # 3. Inférence YOLO (1 frame sur 4)
-            if frame_count % 4 == 0 or annotated_frame is None:
-                results = model(frame, imgsz=320, verbose=False)
-                annotated_frame = results[0].plot()
+                # Les boxes sont ceux de la derniere inference, mais l'image est toujours recente.
+                web_frame = frame.copy()
+                draw_detections(web_frame, current_detections)
+                ret, buffer = cv2.imencode(
+                    '.jpg', web_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+                )
+                if not ret:
+                    continue
 
-            # 4. Envoi vers Flask
-            ret, buffer = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            if ret:
                 with lock:
                     output_frame = buffer.tobytes()
+                    output_frame_id += 1
+            except Exception as error:
+                app.logger.warning('Frame UDP ignoree: %s', error)
+    except OSError as error:
+        app.logger.exception('Reception UDP arretee: %s', error)
+    finally:
+        udp_socket.close()
 
-        except Exception as e:
-            print(f"Erreur de réception UDP : {e}")
-            break
 
-    udp_socket.close()
+def run_detection(model):
+    """Execute YOLO sur le dernier frame disponible, sans mettre UDP en attente."""
+    global detections
+    processed_frame_id = 0
+
+    while True:
+        with lock:
+            if latest_frame is None or latest_frame_id == processed_frame_id:
+                frame_to_process = None
+            else:
+                frame_to_process = latest_frame.copy()
+                frame_id = latest_frame_id
+
+        if frame_to_process is None:
+            time.sleep(0.01)
+            continue
+
+        try:
+            result = model(frame_to_process, imgsz=320, verbose=False)[0]
+            current_detections = []
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                class_id = int(box.cls[0].item())
+                current_detections.append((
+                    x1, y1, x2, y2,
+                    result.names[class_id],
+                    float(box.conf[0].item()),
+                ))
+
+            with lock:
+                detections = current_detections
+        except Exception as error:
+            # Une frame invalide ne doit pas arreter le service video.
+            app.logger.exception('Erreur YOLO: %s', error)
+        finally:
+            processed_frame_id = frame_id
 
 
 def generate_web_stream():
     """Générateur de flux HTTP MJPEG pour les clients web"""
-    global output_frame
+    last_sent_id = 0
     while True:
         with lock:
-            if output_frame is None:
-                time.sleep(0.01)
-                continue
             frame_bytes = output_frame
+            frame_id = output_frame_id
+
+        if frame_bytes is None or frame_id == last_sent_id:
+            time.sleep(0.01)
+            continue
+
+        last_sent_id = frame_id
 
         # Envoie l'image au format multipart
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        time.sleep(0.03)  # Limite l'envoi web à ~30 FPS
 
 
 @app.route('/')
@@ -282,7 +353,7 @@ def index():
         <div class="hero">
             <div>
                 <h2>Flux <span>en direct</span> — réseau local</h2>
-                <p>Interface responsive : le flux s'adapte à la taille de l'écran sans déformation. Noir &vert propre, lisible en plein écran sur mobile comme sur desktop.</p>
+                <p>Interface responsive : le flux s'adapte à la taille de l'écran sans déformation.</p>
             </div>
             <div class="stats">
                 <span class="stat">UDP <b>:5000</b></span>
@@ -353,7 +424,6 @@ def index():
             if(img.naturalWidth === 0 && okOnce){
                 const u = new URL(img.src, location.href);
                 u.searchParams.set('t', Date.now());
-                // ne recharge que si vraiment bloqué pour éviter de couper un flux MJPEG sain
             }
         }, 5000);
     </script>
@@ -369,10 +439,17 @@ def video_feed():
 
 
 if __name__ == '__main__':
-    # 1. Démarrage du récepteur TCP/YOLO en arrière-plan
-    t = threading.Thread(target=receive_and_process, daemon=True)
-    t.start()
+    print("Chargement et préparation du modèle YOLO...")
+    model_global = YOLO('yolov8n.pt')
+    
+    # Inférence à vide (dummy frame) pour forcer PyTorch à allouer la mémoire
+    dummy_frame = np.zeros((320, 320, 3), dtype=np.uint8)
+    model_global(dummy_frame, imgsz=320, verbose=False)
+    print("Modèle YOLO prêt ! Lancement des services...")
+    # La reception et l'inference sont separees pour preserver une faible latence.
+    threading.Thread(target=receive_frames, daemon=True).start()
+    threading.Thread(target=run_detection,args=(model_global,), daemon=True).start()
 
-    # 2. Lancement du serveur Web Flask sur le port 8000
+    # Lancement du serveur Web Flask sur le port 8000
     # Accessible via http://<IP_DE_CE_PC>:8000 sur le réseau local
     app.run(host='0.0.0.0', port=8000, debug=False)
