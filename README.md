@@ -9,7 +9,7 @@ flowchart LR
     CAM[Webcam] --> EM[Émetteur<br/>emeteur.py]
     EM -- "UDP :5000<br/>1 frame JPEG = 1 datagramme" --> REC[Récepteur<br/>recepteur.py]
     REC -- "inférence YOLOv8n" --> REC
-    REC -- "HTTP :8000<br/>page + flux MJPEG" --> C1[Navigateur]
+    REC -- "HTTP :8000<br/>page + flux MJPEG" --> C1[PC]
     REC --> C2[Téléphone]
 ```
 
