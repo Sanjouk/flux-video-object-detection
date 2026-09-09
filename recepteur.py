@@ -1,11 +1,14 @@
-# recepteur.py : recoit le flux UDP de emeteur.py, detecte avec YOLOv8n, diffuse en MJPEG via Flask.
+# recepteur.py : recoit le flux UDP de emeteur.py, detecte avec YOLO11, diffuse en MJPEG via Flask.
 # Architecture a 3 threads : reception UDP (receive_frames) + inference YOLO (run_detection) + serveur Flask.
 # Aucun thread ne bloque les autres : echange via variables globales protegees par `lock`.
 import socket
+import platform
 import cv2
 import numpy as np
 import threading
 import time
+from pathlib import Path
+import torch
 from ultralytics import YOLO
 from flask import Flask, Response, render_template_string
 
@@ -27,10 +30,55 @@ nb_objets = 0
 
 # Config reseau : ecoute sur toutes les interfaces ; 1 datagramme max = 64 Ko - 1 (limite UDP).
 # JPEG_QUALITY regle la re-compression web, independante de la qualite d'envoi de l'emetteur.
-UDP_HOST = '0.0.0.0'
+UDP_HOST = "0.0.0.0"
 UDP_PORT = 5000
 MAX_DATAGRAM_SIZE = 65535
 JPEG_QUALITY = 60
+
+# Profil qualite : modele small ; remplacer par yolo11n.pt pour privilegier la vitesse.
+MODEL_PATH = Path(__file__).resolve().parent / "yolo11s.pt"
+
+
+def select_detection_device():
+    """CUDA sur Windows/Linux, MPS sur macOS, sinon CPU (toutes plateformes)."""
+    if torch.cuda.is_available():
+        return "cuda:0"
+    mps = getattr(torch.backends, "mps", None)
+    if platform.system() == "Darwin" and mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+DETECTION_DEVICE = select_detection_device()
+DETECTION_IMGSZ = 640
+DETECTION_CONF = 0.50
+# Options communes au warmup et a la detection.
+DETECTION_OPTIONS = dict(
+    imgsz=DETECTION_IMGSZ, conf=DETECTION_CONF,
+    device=DETECTION_DEVICE, verbose=False,
+)
+
+
+def prepare_model():
+    """Charge et teste le modele ; retente sur CPU si l'accelerateur echoue."""
+    global DETECTION_DEVICE
+    model = YOLO(str(MODEL_PATH))
+    dummy_frame = np.zeros((DETECTION_IMGSZ, DETECTION_IMGSZ, 3), dtype=np.uint8)
+    try:
+        model(dummy_frame, **DETECTION_OPTIONS)
+    except (RuntimeError, NotImplementedError) as error:
+        if DETECTION_DEVICE == "cpu":
+            raise
+        app.logger.warning(
+            "Initialisation %s impossible (%s), nouvel essai sur CPU.",
+            DETECTION_DEVICE, error,
+        )
+        DETECTION_DEVICE = "cpu"
+        DETECTION_OPTIONS["device"] = "cpu"
+        # Recharge pour ne pas reutiliser un predictor partiellement initialise sur GPU.
+        model = YOLO(str(MODEL_PATH))
+        model(dummy_frame, **DETECTION_OPTIONS)
+    return model
 
 
 def draw_detections(frame, current_detections):
@@ -39,7 +87,7 @@ def draw_detections(frame, current_detections):
         # Cadre vert autour de l'objet detecte (epaisseur 2 px).
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 136), 2)
         # Etiquette affichee, ex. "person 87%" : confiance formatee en pourcentage sans decimales.
-        text = f'{label} {confidence:.0%}'
+        text = f"{label} {confidence:.0%}"
         # Mesure le texte pour dimensionner le fond de l'etiquette juste derriere.
         (text_width, text_height), baseline = cv2.getTextSize(
             text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
@@ -56,19 +104,34 @@ def draw_detections(frame, current_detections):
         )
         # Texte sombre antialiase, leger decalage (+4 px) pour ne pas toucher le bord du fond.
         cv2.putText(
-            frame, text, (x1 + 4, label_top - baseline - 3),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (10, 12, 16), 1, cv2.LINE_AA
+            frame,
+            text,
+            (x1 + 4, label_top - baseline - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (10, 12, 16),
+            1,
+            cv2.LINE_AA,
         )
+
 
 def receive_frames():
     """Recoit les frames UDP, vide le buffer pour ne garder que la plus recente et la publie pour le web."""
-    global latest_frame, latest_frame_id, output_frame, output_frame_id, fps_display, fps_last_update
+    global \
+        latest_frame, \
+        latest_frame_id, \
+        output_frame, \
+        output_frame_id, \
+        fps_display, \
+        fps_last_update
 
     # Socket UDP d'ecoute : recoit les datagrammes JPEG envoyes par emeteur.py.
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # Buffer de reception elargi (256 Ko) pour absorber les rafales sans jeter trop de frames.
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
-    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Re-bind immediat du port apres un redemarrage.
+    udp_socket.setsockopt(
+        socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+    )  # Re-bind immediat du port apres un redemarrage.
     udp_socket.bind((UDP_HOST, UDP_PORT))
     udp_socket.setblocking(False)  # Permet le dépilement non-bloquant du buffer
 
@@ -79,7 +142,7 @@ def receive_frames():
     try:
         while True:
             packet = None
-            
+
             # Flush du buffer : dépile tous les paquets en attente pour ne garder que le dernier
             while True:
                 try:
@@ -95,7 +158,9 @@ def receive_frames():
 
             try:
                 # Decode le payload JPEG en image OpenCV (BGR) directement depuis les bytes recus.
-                frame = cv2.imdecode(np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR)
+                frame = cv2.imdecode(
+                    np.frombuffer(packet, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
                 if frame is None or frame.size == 0:
                     continue
 
@@ -110,14 +175,34 @@ def receive_frames():
                 web_frame = frame.copy()
                 draw_detections(web_frame, current_detections)
                 # FPS en haut a droite : le chip HTML "REC" occupe le coin haut-gauche et masquait l'ancien texte.
-                fps_text = f'{fps_display:.0f} FPS - {len(current_detections)} obj'
-                (fps_tw, fps_th), fps_bl = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                fps_x, fps_y = web_frame.shape[1] - fps_tw - 18, 10  # marge de 10 px depuis le bord droit/haut
-                cv2.rectangle(web_frame, (fps_x - 8, fps_y), (fps_x + fps_tw + 8, fps_y + fps_th + fps_bl + 10), (10, 12, 16), -1)  # fond sombre, comme les etiquettes YOLO
-                cv2.putText(web_frame, fps_text, (fps_x, fps_y + fps_th + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 136), 2, cv2.LINE_AA)
+                fps_text = f"{fps_display:.0f} FPS - {len(current_detections)} obj"
+                (fps_tw, fps_th), fps_bl = cv2.getTextSize(
+                    fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+                )
+                fps_x, fps_y = (
+                    web_frame.shape[1] - fps_tw - 18,
+                    10,
+                )  # marge de 10 px depuis le bord droit/haut
+                cv2.rectangle(
+                    web_frame,
+                    (fps_x - 8, fps_y),
+                    (fps_x + fps_tw + 8, fps_y + fps_th + fps_bl + 10),
+                    (10, 12, 16),
+                    -1,
+                )  # fond sombre, comme les etiquettes YOLO
+                cv2.putText(
+                    web_frame,
+                    fps_text,
+                    (fps_x, fps_y + fps_th + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 136),
+                    2,
+                    cv2.LINE_AA,
+                )
                 # Re-encode pour le web (qualite 60) : reglage d'affichage, independant du JPEG reseau.
                 ret, buffer = cv2.imencode(
-                    '.jpg', web_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+                    ".jpg", web_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
                 )
                 if not ret:
                     continue
@@ -134,10 +219,10 @@ def receive_frames():
                     fps_count, fps_t0, fps_last_update = 0, now, now
             # Paquet corrompu / decode rate : on jette juste cette frame, le flux continue.
             except Exception as error:
-                app.logger.warning('Frame UDP ignoree: %s', error)
+                app.logger.warning("Frame UDP ignoree: %s", error)
     # Erreur socket (port occupe, reseau coupe) : log + sortie, le finally ferme le socket.
     except OSError as error:
-        app.logger.exception('Reception UDP arretee: %s', error)
+        app.logger.exception("Reception UDP arretee: %s", error)
     finally:
         udp_socket.close()
 
@@ -163,19 +248,24 @@ def run_detection(model):
             continue
 
         try:
-            # imgsz=320 : compromis vitesse/precision (coherent avec le warmup du __main__) ; [0] = 1ere image du batch.
-            result = model(frame_to_process, imgsz=320, verbose=False)[0]
+            # Memes parametres que le warmup ; [0] = 1ere image du batch.
+            result = model(frame_to_process, **DETECTION_OPTIONS)[0]
             current_detections = []
-            for box in result.boxes:
-                # Coordonnees pixels (haut-gauche -> bas-droit), rapatriees sur CPU puis en int pour OpenCV.
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                class_id = int(box.cls[0].item())
+            # Un seul transfert GPU -> CPU pour toutes les boxes du frame.
+            for x1, y1, x2, y2, confidence, class_id in result.boxes.data.cpu().tolist():
+                x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
+                class_id = int(class_id)
                 # Stocke (box, label texte via result.names, score) : format consomme par draw_detections.
-                current_detections.append((
-                    x1, y1, x2, y2,
-                    result.names[class_id],
-                    float(box.conf[0].item()),
-                ))
+                current_detections.append(
+                    (
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        result.names[class_id],
+                        float(confidence),
+                    )
+                )
 
             # Remplace atomiquement la liste : receive_frames lit toujours une liste coherente.
             with lock:
@@ -183,7 +273,7 @@ def run_detection(model):
                 nb_objets = len(current_detections)
         except Exception as error:
             # Une frame invalide ne doit pas arreter le service video.
-            app.logger.exception('Erreur YOLO: %s', error)
+            app.logger.exception("Erreur YOLO: %s", error)
         finally:
             # Marque la frame comme traitee meme en cas d'erreur : evite de boucler dessus.
             processed_frame_id = frame_id
@@ -206,15 +296,14 @@ def generate_web_stream():
         last_sent_id = frame_id
 
         # Envoie l'image au format multipart
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
 
 
 # Page HTML : un simple <img> qui consomme le flux MJPEG ci-dessous (+ overlays/panneaux statiques).
-@app.route('/')
+@app.route("/")
 def index():
     """Page web affichant le flux vidéo - UI responsive moderne"""
-    return render_template_string('''
+    return render_template_string("""
 <!doctype html>
 <html lang="fr">
 <head>
@@ -391,7 +480,7 @@ def index():
                 <div class="logo">Y</div>
                 <div style="min-width:0">
                     <h1>Relais YOLO</h1>
-                    <p>Détection d'objets &middot; YOLOv8n &middot; Flux UDP &rarr; MJPEG</p>
+                    <p>Détection d'objets &middot; {{ model_name }} &middot; Flux UDP &rarr; MJPEG</p>
                 </div>
             </div>
             <div class="badges">
@@ -410,7 +499,7 @@ def index():
             <div class="stats">
                 <span class="stat">UDP <b>:5000</b></span>
                 <span class="stat">HTTP <b>:8000</b></span>
-                <span class="stat">YOLO <b>v8n</b></span>
+                <span class="stat">Modèle <b>{{ model_name }}</b></span>
                 <span class="stat">FPS <b id="fps">–</b></span>
                 <span class="stat">Objets <b id="objets">0</b></span>
             </div>
@@ -459,7 +548,7 @@ def index():
         </div>
     </main>
 
-    <footer>D&eacute;tection YOLOv8 &middot; Flask MJPEG &middot; Fait pour le r&eacute;seau local</footer>
+    <footer>D&eacute;tection {{ model_name }} &middot; Flask MJPEG &middot; Fait pour le r&eacute;seau local</footer>
 
     <script>
         // Masque le placeholder dès que le flux charge, le réaffiche en cas d'erreur.
@@ -497,37 +586,40 @@ def index():
     </script>
 </body>
 </html>
-    ''')
+    """, model_name=MODEL_PATH.stem)
 
 
 # Endpoint MJPEG : chaque `yield` envoie une image JPEG delimitee par `--frame`.
-@app.route('/video_feed')
+@app.route("/video_feed")
 def video_feed():
     """Endpoint HTTP diffusant le flux vidéo"""
-    return Response(generate_web_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(
+        generate_web_stream(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
 
 # FPS courant : 0 si le flux est coupe depuis plus de 2 s (evite une valeur fige).
-@app.route('/fps')
+@app.route("/fps")
 def fps():
     """FPS + objets detectes (0 si flux coupe depuis plus de 2 s)."""
     frais = time.monotonic() - fps_last_update <= 2.0
-    return {'fps': round(fps_display, 1) if frais else 0.0, 'objets': nb_objets if frais else 0}
+    return {
+        "fps": round(fps_display, 1) if frais else 0.0,
+        "objets": nb_objets if frais else 0,
+    }
 
 
 # Point d'entree : warmup YOLO + 2 threads daemon + serveur Flask (appel bloquant).
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("Chargement et préparation du modèle YOLO...")
-    # Charge le modele nano (leger, temps reel) depuis le poids local versionne dans le repo.
-    model_global = YOLO('yolov8n.pt')
-    
-    # Inférence à vide (dummy frame) pour forcer PyTorch à allouer la mémoire
-    dummy_frame = np.zeros((320, 320, 3), dtype=np.uint8)
-    model_global(dummy_frame, imgsz=320, verbose=False)
+    # Ultralytics telecharge les poids officiels s'ils ne sont pas encore presents.
+    model_global = prepare_model()
+    print(f"Système : {platform.system()} | modèle : {MODEL_PATH.name} | appareil : {DETECTION_DEVICE} | imgsz : {DETECTION_IMGSZ}")
     print("Modèle YOLO prêt ! Lancement des services...")
     # La reception et l'inference sont separees pour preserver une faible latence.
     threading.Thread(target=receive_frames, daemon=True).start()
-    threading.Thread(target=run_detection,args=(model_global,), daemon=True).start()
+    threading.Thread(target=run_detection, args=(model_global,), daemon=True).start()
 
     # Lancement du serveur Web Flask sur le port 8000
     # Accessible via http://<IP_DE_CE_PC>:8000 sur le réseau local
-    app.run(host='0.0.0.0', port=8000, debug=False)
+    app.run(host="0.0.0.0", port=8000, debug=False)
