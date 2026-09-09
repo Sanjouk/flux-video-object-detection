@@ -1,8 +1,8 @@
-# Détection d'objets sur flux vidéo (YOLOv8n)
+# Détection d'objets sur flux vidéo 
 
 Projet réalisé dans le cadre de l'UE **IA03** : mise en pratique d'algorithmes d'intelligence artificielle, ici la **détection d'objets en temps réel** sur un flux vidéo transmis en réseau.
 
-Le principe : un premier poste, l'**émetteur**, capture sa webcam et envoie le flux brut en réseau à un deuxième poste, le **récepteur**. Le récepteur effectue la détection d'objets (YOLOv8n) puis héberge un **serveur web** affichant le flux annoté en direct. Tout appareil du réseau local peut voir le résultat dans un simple navigateur.
+Le principe : un premier poste, l'**émetteur**, capture sa webcam et envoie le flux brut en réseau à un deuxième poste, le **récepteur**. Le récepteur effectue la détection d'objets puis héberge un **serveur web** affichant le flux annoté en direct. Tout appareil du réseau local peut voir le résultat dans un simple navigateur.
 
 ```mermaid
 flowchart LR
@@ -19,6 +19,7 @@ flowchart LR
 - Chip incrusté `FPS - N obj` et badges **FPS** / **Objets** dans la page.
 - Reconnexion automatique : la page reprend le flux seule après un redémarrage du récepteur.
 - Endpoints : `/` (page), `/video_feed` (flux MJPEG brut), `/fps` (JSON `{fps, objets}`).
+- Possibilité de choisir le model depuis l'interface client : `YOLOv8n` `YOLOv11n`(par défaut) `YOLOv8s` `YOLOv8m`
 
 ## 1. Prérequis
 
@@ -53,7 +54,7 @@ Le récepteur fonctionne sur Windows, Linux et macOS. Il sélectionne automatiqu
 CUDA si PyTorch le détecte, puis MPS sur macOS, sinon le CPU. Pour NVIDIA, utiliser
 une installation PyTorch compatible CUDA (voir https://pytorch.org/get-started/locally/).
 Si le warmup GPU échoue, le modèle est rechargé sur CPU ; l'appareil finalement
-utilisé est affiché au démarrage. Les poids `yolo11s.pt` sont recherchés à côté
+utilisé est affiché au démarrage. Les poids des modèles YOLO sont recherchés à côté
 de `recepteur.py` et téléchargés par Ultralytics s'ils sont absents.
 
 Dans `recepteur.py`, `DETECTION_CONF = 0.50` filtre les prédictions peu sûres
@@ -88,7 +89,6 @@ restent identiques.
 
 ## Fichiers du dépôt
 
-- `emeteur.py` - capture webcam (480×360, JPEG ~40 %), envoi UDP vers `TARGET_IP:5000`.
+- `emeteur.py` - capture webcam (480×360, JPEG), envoi UDP vers `TARGET_IP:5000`.
 - `recepteur.py` - réception UDP + inférence YOLO + serveur Flask (`:8000`).
-- `yolov8n.pt` - poids du modèle YOLOv8 nano (léger, adapté au temps réel).
 - `requirements.txt` - dépendances (`opencv-python`, `numpy`, `flask`, `ultralytics`, …).
