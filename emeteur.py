@@ -6,7 +6,7 @@ import socket
 import errno
 
 # 1. Utilise l'IP directe pour tester d'abord si le flux passe
-TARGET_IP = "10.77.180.161"
+TARGET_IP = "10.77.180.142"
 PORT = 5000
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
