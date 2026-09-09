@@ -47,6 +47,24 @@ Une seule valeur à adapter : l'adresse IP du poste **récepteur**, dans `emeteu
 
 > En cas de blocage, vérifier le pare-feu : autoriser l'UDP sur le port **5000** et le TCP sur le port **8000**.
 
+### Réglage de la détection
+
+Le récepteur fonctionne sur Windows, Linux et macOS. Il sélectionne automatiquement
+CUDA si PyTorch le détecte, puis MPS sur macOS, sinon le CPU. Pour NVIDIA, utiliser
+une installation PyTorch compatible CUDA (voir https://pytorch.org/get-started/locally/).
+Si le warmup GPU échoue, le modèle est rechargé sur CPU ; l'appareil finalement
+utilisé est affiché au démarrage. Les poids `yolo11s.pt` sont recherchés à côté
+de `recepteur.py` et téléchargés par Ultralytics s'ils sont absents.
+
+Dans `recepteur.py`, `DETECTION_CONF = 0.50` filtre les prédictions peu sûres
+pour limiter les fausses détections. Augmenter ce seuil masque davantage de
+prédictions, mais peut aussi faire disparaître des objets réels ; le diminuer
+permet d'en afficher davantage. Un score élevé ne garantit pas la bonne classe.
+`DETECTION_IMGSZ = 640` conserve plus de détails à l'entrée
+du modèle, avec un coût de calcul supérieur. Ces réglages sont à vérifier sur
+le flux réel ; les threads et la politique de conservation du dernier frame
+restent identiques.
+
 ## 4. Lancement et accès à l'interface
 
 1. Lancer le récepteur (le modèle YOLO met quelques secondes à charger) :
