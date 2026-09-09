@@ -182,66 +182,175 @@ def generate_web_stream():
 
 @app.route('/')
 def index():
-    """Page web avec sélecteur de modèle."""
-    return render_template_string('''
+    """Page web affichant le flux vidéo - UI responsive moderne"""
+    return render_template_string("""
 <!doctype html>
 <html lang="fr">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
-    <title>Relais YOLO — Live</title>
+    <title>Relais YOLO - Live</title>
     <style>
         :root{
-            --bg:#0f1115; --card:#1c1f27; --card2:#212533;
-            --border:#2a2f3e; --accent:#00ff88; --accent2:#00d4ff;
-            --text:#eef1f6; --muted:#9aa3b2; --radius:16px;
+            --bg:#0f1115;
+            --bg2:#171a20;
+            --card:#1c1f27;
+            --card2:#212533;
+            --border:#2a2f3e;
+            --accent:#00ff88;
+            --accent2:#00d4ff;
+            --text:#eef1f6;
+            --muted:#9aa3b2;
+            --radius:16px;
+            --shadow: 0 10px 40px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.06) inset;
         }
         *{box-sizing:border-box;margin:0;padding:0}
+        html,body{height:100%}
         body{
-            font-family: system-ui, -apple-system, sans-serif;
-            background: linear-gradient(180deg, var(--bg), #0a0c10);
-            color:var(--text); min-height:100vh; display:flex; flex-direction:column;
+            font-family: ui-sans-system, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
+            background:
+                radial-gradient(900px 600px at 20% -10%, rgba(0,255,136,.14), transparent 60%),
+                radial-gradient(800px 500px at 95% 0%, rgba(0,212,255,.10), transparent 60%),
+                linear-gradient(180deg, var(--bg), #0a0c10);
+            color:var(--text);
+            min-height:100dvh;
+            display:flex;
+            flex-direction:column;
+            -webkit-font-smoothing:antialiased;
         }
+        /* Header */
         header{
-            position:sticky; top:0; z-index:10; backdrop-filter: blur(12px);
-            background: rgba(15,17,21,.75); border-bottom:1px solid rgba(255,255,255,.07);
+            position:sticky; top:0; z-index:10;
+            backdrop-filter: blur(12px) saturate(1.2);
+            background: rgba(15,17,21,.72);
+            border-bottom:1px solid rgba(255,255,255,.07);
         }
         .nav{
-            max-width:1160px; margin:0 auto; padding:14px 24px;
+            max-width:1160px; margin:0 auto;
+            padding:14px clamp(16px, 3vw, 28px);
             display:flex; align-items:center; justify-content:space-between; gap:16px;
         }
-        .brand{display:flex; align-items:center; gap:12px;}
+        .brand{display:flex; align-items:center; gap:12px; min-width:0}
         .logo{
-            width:36px; height:36px; border-radius:10px; display:grid; place-items:center;
+            width:36px; height:36px; border-radius:10px;
+            display:grid; place-items:center;
             background: linear-gradient(135deg, var(--accent), var(--accent2));
             color:#0a0c10; font-weight:800; font-size:18px;
+            box-shadow: 0 6px 20px rgba(0,255,136,.35);
+            flex-shrink:0;
         }
-        .model-picker{
-            display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.05);
-            padding:6px 12px; border-radius:10px; border:1px solid var(--border);
+        .brand h1{font-size:clamp(16px, 2.2vw, 18px); font-weight:700; letter-spacing:-.02em; line-height:1.1}
+        .brand p{font-size:12.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+        .badges{display:flex; align-items:center; gap:10px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end}
+        .badge{
+            display:inline-flex; align-items:center; gap:8px;
+            padding:7px 12px; border-radius:999px;
+            font-size:12.5px; font-weight:600; letter-spacing:.02em;
+            border:1px solid var(--border); background:rgba(255,255,255,.04);
         }
-        .model-picker label{font-size:12.5px; color:var(--muted); font-weight:600;}
-        .model-select{
-            background:var(--card2); color:var(--text); border:1px solid var(--border);
-            padding:6px 10px; border-radius:6px; font-size:13px; outline:none; cursor:pointer;
-        }
-        .model-select:disabled{opacity:.5; cursor:wait;}
-        main{flex:1; width:100%; max-width:1160px; margin:0 auto; padding:24px; display:flex; flex-direction:column; gap:18px;}
+        .badge.live{background:rgba(0,255,136,.12); border-color:rgba(0,255,136,.35); color:#b6ffde}
+        .dot{width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 6px rgba(0,255,136,.18)}
+        .dot.pulse{animation:pulse 1.6s infinite}
+        @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,255,136,.45)} 70%{box-shadow:0 0 0 10px rgba(0,255,136,0)} 100%{box-shadow:0 0 0 0 rgba(0,255,136,0)}}
+        .badge.muted{color:var(--muted)}
+        /* Layout */
+        main{flex:1; width:100%; max-width:1160px; margin:0 auto; padding:clamp(16px, 3vw, 28px); display:flex; flex-direction:column; gap:18px}
+        .hero{display:flex; flex-wrap:wrap; align-items:end; justify-content:space-between; gap:12px}
+        .hero h2{font-size:clamp(20px, 3.5vw, 28px); font-weight:800; letter-spacing:-.03em; line-height:1.1}
+        .hero h2 span{background:linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text}
+        .hero p{color:var(--muted); font-size:clamp(13px, 1.8vw, 14.5px); max-width:52ch; line-height:1.5}
+        /* Card video */
         .card{
             background: linear-gradient(180deg, var(--card), var(--card2));
-            border:1px solid rgba(255,255,255,.08); border-radius:var(--radius); overflow:hidden;
+            border:1px solid rgba(255,255,255,.08);
+            border-radius:var(--radius);
+            box-shadow:var(--shadow);
+            overflow:hidden;
         }
         .video-wrap{
-            position:relative; background:#07080a; aspect-ratio: 4 / 3;
-            max-height: min(72vh, 760px); display:grid; place-items:center;
+            position:relative;
+            background:#07080a;
+            width:100%; /* pleine largeur de la carte : plus de fond gris sur les cotes */
+            aspect-ratio: 4 / 3; /* repli avant la 1re frame, corrige en JS au ratio reel du flux */
+            overflow:hidden;
         }
-        .video-wrap img{width:100%; height:100%; object-fit:contain; display:block;}
-        .status-toast{
-            position:absolute; bottom:12px; right:12px; background:rgba(0,0,0,.75);
-            padding:6px 12px; border-radius:20px; font-size:12px; border:1px solid var(--border);
-            display:none;
+        .video-wrap img{
+            position:absolute; inset:0;
+            width:100%; height:100%;
+            object-fit:contain; /* remplit exactement des que le ratio = ratio flux ; meme fond sinon */
+            display:block;
+            background:#07080a;
         }
+        .video-wrap::after{
+            content:""; position:absolute; inset:0;
+            border-radius:0; pointer-events:none;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+        }
+        .overlay{
+            position:absolute; left:12px; top:12px;
+            display:flex; gap:8px; align-items:center;
+        }
+        .chip{
+            font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+            padding:6px 9px; border-radius:999px;
+            background:rgba(0,0,0,.55); backdrop-filter:blur(8px);
+            border:1px solid rgba(255,255,255,.12); color:#fff;
+        }
+        .chip.rec{color:#ff3b3b; border-color:rgba(255,59,59,.35)}
+        .chip.rec::before{content:"●"; margin-right:6px; animation:blink 1.2s infinite}
+        @keyframes blink{50%{opacity:.35}}
+        .placeholder{
+            position:absolute; inset:0; display:grid; place-items:center;
+            color:var(--muted); font-size:14px; text-align:center; padding:24px;
+        }
+        .placeholder[hidden]{display:none !important}
+        .spinner{
+            width:28px; height:28px; border-radius:50%;
+            border:3px solid rgba(255,255,255,.12); border-top-color:var(--accent);
+            animation:spin .9s linear infinite; margin:0 auto 10px;
+        }
+        @keyframes spin{to{transform:rotate(360deg)}}
+        /* Barre infos */
+        .bar{
+            display:flex; flex-wrap:wrap; gap:10px;
+            align-items:center; justify-content:space-between;
+            padding:12px 14px;
+            background:rgba(255,255,255,.03);
+            border-top:1px solid rgba(255,255,255,.07);
+            font-size:13px; color:var(--muted);
+        }
+        .bar strong{color:var(--text); font-weight:600}
+        .stats{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+        .stat{
+            display:inline-flex; align-items:center; gap:6px;
+            padding:6px 10px; border-radius:999px;
+            background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.07);
+            font-size:12.5px;
+        }
+        .stat b{color:var(--text)}
+        /* Grille infos secondaires */
+        .grid{display:grid; grid-template-columns: repeat(12, 1fr); gap:14px}
+        .panel{grid-column: span 6; padding:16px; background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.07); border-radius:14px}
+        .panel h3{font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin-bottom:8px}
+        .panel p{font-size:13.5px; line-height:1.6; color:#cbd3e0}
+        .panel code{font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; background:rgba(255,255,255,.07); padding:2px 6px; border-radius:6px; color:#fff}
+        @media (max-width: 720px){
+            .panel{grid-column: span 12}
+            .nav{padding-block:12px}
+            .brand p{display:none}
+        }
+        @media (max-width: 420px){
+            .badges .badge.muted{display:none}
+            .bar{font-size:12.5px}
+        }
+        footer{
+            padding:14px clamp(16px, 3vw, 28px);
+            text-align:center; color:var(--muted); font-size:12.5px;
+            border-top:1px solid rgba(255,255,255,.06);
+        }
+        footer a{color:var(--accent); text-decoration:none}
+        footer a:hover{text-decoration:underline}
     </style>
 </head>
 <body>
@@ -249,84 +358,115 @@ def index():
         <div class="nav">
             <div class="brand">
                 <div class="logo">Y</div>
-                <div>
-                    <h1 style="font-size:18px">Relais YOLO</h1>
+                <div style="min-width:0">
+                    <h1>Relais YOLO</h1>
+                    <p>Détection d'objets &middot; {{ model_name }} &middot; Flux UDP &rarr; MJPEG</p>
                 </div>
             </div>
-            
-            <div class="model-picker">
-                <label for="modelSelect">Modèle :</label>
-                <select id="modelSelect" class="model-select" onchange="changeModel(this.value)">
-                    {% for file, name in models.items() %}
-                        <option value="{{ file }}" {% if file == current_model %}selected{% endif %}>{{ name }}</option>
-                    {% endfor %}
-                </select>
+            <div class="badges">
+                <span class="badge live"><span class="dot pulse"></span> LIVE</span>
+                <span class="badge muted">:8000 &middot; /video_feed</span>
             </div>
         </div>
     </header>
 
     <main>
-        <section class="card">
-            <div class="video-wrap">
-                <img id="stream" src="/video_feed" alt="Flux YOLO en direct">
-                <div id="toast" class="status-toast">Chargement du modèle...</div>
+        <div class="hero">
+            <div>
+                <h2>Flux <span>en direct</span> - réseau local</h2>
+                <p>Interface responsive : le flux s'adapte à la taille de l'écran sans déformation.</p>
+            </div>
+            <div class="stats">
+                <span class="stat">UDP <b>:5000</b></span>
+                <span class="stat">HTTP <b>:8000</b></span>
+                <span class="stat">Modèle <b>{{ model_name }}</b></span>
+                <span class="stat">FPS <b id="fps">–</b></span>
+                <span class="stat">Objets <b id="objets">0</b></span>
+            </div>
+        </div>
+
+        <section class="card" aria-label="Flux vidéo">
+            <div class="video-wrap" id="wrap">
+                <img id="stream" src="/video_feed" alt="Flux YOLO en direct" loading="eager" decoding="async"
+                     onload="document.getElementById('ph').hidden=true"
+                     onerror="document.getElementById('ph').hidden=false">
+                <div class="overlay">
+                    <span class="chip rec">REC</span>
+                    <span class="chip" id="res">640 &times; 480 &middot; MJPEG</span>
+                </div>
+                <div class="placeholder" id="ph">
+                    <div>
+                        <div class="spinner"></div>
+                        <div><strong style="color:var(--text)">Connexion au flux…</strong><br>En attente de <code>/video_feed</code></div>
+                    </div>
+                </div>
+            </div>
+            <div class="bar">
+                <div>Flux MJPEG en temps réel &middot; <strong>ratio natif caméra</strong> &middot;</div>
+                <div class="stats">
+                    <span class="stat" title="Ouvrir le flux brut"><a href="/video_feed" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">Ouvrir le flux brut &nearr;</a></span>
+                </div>
             </div>
         </section>
+
+        <div class="grid">
+            <div class="panel">
+                <h3>Astuces d'affichage</h3>
+                <p>
+                    Sur mobile, pincez pour zoomer. Sur desktop, mettez en plein écran (<code>F11</code>).
+                    
+                </p>
+            </div>
+            <div class="panel">
+                <h3>Diagnostic</h3>
+                <p>
+                    Émetteur : <code>python emmeteur.py</code> &rarr; <code>RECEIVER_IP:5000</code> (UDP).<br>
+                    Récepteur : <code>python receveur.py</code> &rarr; ouvre <code>http://&lt;ip&gt;:8000</code>.<br>
+                    Si écran noir, vérifie le firewall et que l'émetteur envoie bien.
+                </p>
+            </div>
+        </div>
     </main>
 
+    <footer>D&eacute;tection {{ model_name }} &middot; Flask MJPEG &middot; Fait pour le r&eacute;seau local</footer>
+
     <script>
-        async function changeModel(modelName) {
-            const select = document.getElementById('modelSelect');
-            const toast = document.getElementById('toast');
-            
-            select.disabled = true;
-            toast.style.display = 'block';
-            toast.textContent = 'Changement de modèle en cours...';
-
+        // Masque le placeholder dès que le flux charge, le réaffiche en cas d'erreur.
+        // + met à jour la puce résolution si l'image charge.
+        const img = document.getElementById('stream');
+        const ph  = document.getElementById('ph');
+        const res = document.getElementById('res');
+        const wrap = document.getElementById('wrap');
+        let okOnce = false;
+        img.addEventListener('load', () => {
+            if(!okOnce){ ph.hidden = true; okOnce = true; }
+            if(img.naturalWidth){ res.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' · MJPEG'; wrap.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight; }
+        });
+        img.addEventListener('error', () => { ph.hidden = false; });
+        // Badge FPS : interroge /fps chaque seconde (requete negligeable).
+        const fpsEl = document.getElementById('fps');
+        const objetsEl = document.getElementById('objets');
+        let retryAt = 0; // Prochaine reconnexion autorisee (anti-spam quand le serveur est down).
+        setInterval(async () => {
             try {
-                const response = await fetch('/set_model', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: modelName })
-                });
-                
-                const data = await response.json();
-                if (data.status === 'ok') {
-                    checkModelStatus(select, toast);
-                } else {
-                    alert('Erreur : ' + data.message);
-                    select.disabled = false;
-                    toast.style.display = 'none';
-                }
-            } catch (err) {
-                console.error(err);
-                alert('Erreur réseau lors du changement de modèle');
-                select.disabled = false;
-                toast.style.display = 'none';
+                const d = (await (await fetch('/fps', {cache: 'no-store'})).json());
+                fpsEl.textContent = d.fps; objetsEl.textContent = d.objets;
+            } catch (e) { /* /fps injoignable = recepteur coupe : relance le flux, throttle 5 s */
+                if (Date.now() > retryAt) { retryAt = Date.now() + 5000; img.src = '/video_feed?t=' + Date.now(); }
             }
-        }
-
-        async function checkModelStatus(select, toast) {
-            const interval = setInterval(async () => {
-                try {
-                    const res = await fetch('/model_status');
-                    const data = await res.json();
-                    if (!data.is_loading) {
-                        clearInterval(interval);
-                        select.disabled = false;
-                        toast.textContent = 'Modèle ' + data.active_model + ' prêt !';
-                        setTimeout(() => { toast.style.display = 'none'; }, 2000);
-                    }
-                } catch (e) {
-                    clearInterval(interval);
-                    select.disabled = false;
-                }
-            }, 500);
-        }
+        }, 1000);
+        // Auto-retry discret si le flux coupe (cache-bust)
+        setInterval(() => {
+            if(img.naturalWidth === 0 && okOnce){
+                const u = new URL(img.src, location.href);
+                u.searchParams.set('t', Date.now());
+                img.src = u; // Rejoue la requete : sans cette ligne le retry ne faisait rien.
+            }
+        }, 5000);
     </script>
 </body>
 </html>
-    ''', models=ALLOWED_MODELS, current_model=active_model_name)
+    """, model_name=MODEL_PATH.stem)
 
 
 @app.route('/set_model', methods=['POST'])
