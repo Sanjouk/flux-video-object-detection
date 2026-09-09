@@ -199,6 +199,7 @@ def index():
     """Page web affichant le flux vidéo - UI responsive moderne"""
     with lock:
         model_name = active_model_name.rsplit('.', 1)[0]
+        selected_model = requested_model_name
     return render_template_string("""
 <!doctype html>
 <html lang="fr">
@@ -345,6 +346,9 @@ def index():
             font-size:12.5px;
         }
         .stat b{color:var(--text)}
+        .stat select{max-width:100%; min-width:0; background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px; font:inherit}
+        .stat select:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+        .stat select:disabled{opacity:.6}
         /* Grille infos secondaires */
         .grid{display:grid; grid-template-columns: repeat(12, 1fr); gap:14px}
         .panel{grid-column: span 6; padding:16px; background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.07); border-radius:14px}
@@ -376,7 +380,7 @@ def index():
                 <div class="logo">Y</div>
                 <div style="min-width:0">
                     <h1>Relais YOLO</h1>
-                    <p>Détection d'objets &middot; {{ model_name }} &middot; Flux UDP &rarr; MJPEG</p>
+                    <p>Détection d'objets &middot; <span data-active-model>{{ model_name }}</span> &middot; Flux UDP &rarr; MJPEG</p>
                 </div>
             </div>
             <div class="badges">
@@ -395,7 +399,14 @@ def index():
             <div class="stats">
                 <span class="stat">UDP <b>:5000</b></span>
                 <span class="stat">HTTP <b>:8000</b></span>
-                <span class="stat">Modèle <b>{{ model_name }}</b></span>
+                <label class="stat" for="model-select">Modèle
+                    <select id="model-select">
+                        {% for filename, description in allowed_models.items() %}
+                        <option value="{{ filename }}" {% if filename == selected_model %}selected{% endif %}>{{ description }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <span class="stat" id="model-state" role="status" aria-live="polite">Actif : {{ model_name }}</span>
                 <span class="stat">FPS <b id="fps">–</b></span>
                 <span class="stat">Objets <b id="objets">0</b></span>
             </div>
@@ -444,7 +455,7 @@ def index():
         </div>
     </main>
 
-    <footer>D&eacute;tection {{ model_name }} &middot; Flask MJPEG &middot; Fait pour le r&eacute;seau local</footer>
+    <footer>D&eacute;tection <span data-active-model>{{ model_name }}</span> &middot; Flask MJPEG &middot; Fait pour le r&eacute;seau local</footer>
 
     <script>
         // Masque le placeholder dès que le flux charge, le réaffiche en cas d'erreur.
@@ -462,6 +473,57 @@ def index():
         // Badge FPS : interroge /fps chaque seconde (requete negligeable).
         const fpsEl = document.getElementById('fps');
         const objetsEl = document.getElementById('objets');
+        const modelSelect = document.getElementById('model-select');
+        const modelState = document.getElementById('model-state');
+        let submittingModel = false;
+        let expectedModel = null;
+        async function refreshModelStatus() {
+            if (submittingModel) return;
+            try {
+                const response = await fetch('/model_status', {cache: 'no-store'});
+                if (!response.ok) throw new Error('Statut du modèle indisponible');
+                const status = await response.json();
+                if (submittingModel) return;
+                const loading = status.is_loading || status.requested_model !== status.active_model;
+                modelSelect.value = status.requested_model;
+                modelSelect.disabled = loading;
+                const activeName = status.active_model.replace(/[.]pt$/, '');
+                document.querySelectorAll('[data-active-model]').forEach(el => { el.textContent = activeName; });
+                if (loading) {
+                    modelState.textContent = 'Chargement de ' + status.requested_model + '…';
+                } else if (expectedModel && status.active_model !== expectedModel) {
+                    modelState.textContent = 'Changement échoué. Actif : ' + activeName;
+                } else {
+                    modelState.textContent = 'Actif : ' + activeName;
+                    expectedModel = null;
+                }
+            } catch (error) {
+                modelState.textContent = error.message;
+            }
+        }
+        modelSelect.addEventListener('change', async () => {
+            submittingModel = true;
+            modelSelect.disabled = true;
+            expectedModel = modelSelect.value;
+            modelState.textContent = 'Chargement de ' + expectedModel + '…';
+            try {
+                const response = await fetch('/set_model', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model: expectedModel})
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.message || 'Changement impossible');
+            } catch (error) {
+                expectedModel = null;
+                modelState.textContent = error.message;
+                modelSelect.disabled = false;
+            } finally {
+                submittingModel = false;
+            }
+        });
+        refreshModelStatus();
+        setInterval(refreshModelStatus, 1000);
         let retryAt = 0; // Prochaine reconnexion autorisee (anti-spam quand le serveur est down).
         setInterval(async () => {
             try {
@@ -482,7 +544,7 @@ def index():
     </script>
 </body>
 </html>
-    """, model_name=model_name)
+    """, model_name=model_name, selected_model=selected_model, allowed_models=ALLOWED_MODELS)
 
 
 @app.route('/fps')
