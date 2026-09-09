@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import threading
 import time
+from collections import deque
 from ultralytics import YOLO
 from flask import Flask, Response, render_template_string, request, jsonify
 
@@ -15,6 +16,7 @@ latest_frame = None
 latest_frame_id = 0
 detections = []
 output_frame_id = 0
+frame_times = deque()
 
 # Gestion dynamique des modèles
 ALLOWED_MODELS = {
@@ -99,6 +101,10 @@ def receive_frames():
                 with lock:
                     output_frame = buffer.tobytes()
                     output_frame_id += 1
+                    now = time.monotonic()
+                    frame_times.append(now)
+                    while frame_times and now - frame_times[0] > 2:
+                        frame_times.popleft()
             except Exception as error:
                 app.logger.warning('Frame UDP ignorée : %s', error)
     except OSError as error:
@@ -117,20 +123,28 @@ def run_detection(initial_model):
 
     while True:
         # Vérification si un changement de modèle est requis
-        if requested_model_name != active_model_name:
+        with lock:
+            target_model_name = requested_model_name
+            needs_model_change = target_model_name != active_model_name
+            is_model_loading = needs_model_change
+        if needs_model_change:
             try:
-                is_model_loading = True
-                print(f"Changement de modèle vers {requested_model_name}...")
-                new_model = YOLO(requested_model_name)
+                print(f"Changement de modèle vers {target_model_name}...")
+                new_model = YOLO(target_model_name)
                 new_model(dummy_frame, imgsz=320, verbose=False)  # Warmup
                 model = new_model
-                active_model_name = requested_model_name
+                with lock:
+                    active_model_name = target_model_name
+                    detections = []
                 print(f"Nouveau modèle {active_model_name} actif !")
             except Exception as e:
-                app.logger.error(f"Échec du chargement du modèle {requested_model_name} : {e}")
-                requested_model_name = active_model_name
+                app.logger.error(f"Échec du chargement du modèle {target_model_name} : {e}")
+                with lock:
+                    if requested_model_name == target_model_name:
+                        requested_model_name = active_model_name
             finally:
-                is_model_loading = False
+                with lock:
+                    is_model_loading = False
 
         with lock:
             if latest_frame is None or latest_frame_id == processed_frame_id:
@@ -183,6 +197,8 @@ def generate_web_stream():
 @app.route('/')
 def index():
     """Page web affichant le flux vidéo - UI responsive moderne"""
+    with lock:
+        model_name = active_model_name.rsplit('.', 1)[0]
     return render_template_string("""
 <!doctype html>
 <html lang="fr">
@@ -420,8 +436,8 @@ def index():
             <div class="panel">
                 <h3>Diagnostic</h3>
                 <p>
-                    Émetteur : <code>python emmeteur.py</code> &rarr; <code>RECEIVER_IP:5000</code> (UDP).<br>
-                    Récepteur : <code>python receveur.py</code> &rarr; ouvre <code>http://&lt;ip&gt;:8000</code>.<br>
+                    Émetteur : <code>python emeteur.py</code> &rarr; <code>TARGET_IP:5000</code> (UDP).<br>
+                    Récepteur : <code>python recepteur.py</code> &rarr; ouvre <code>http://&lt;ip&gt;:8000</code>.<br>
                     Si écran noir, vérifie le firewall et que l'émetteur envoie bien.
                 </p>
             </div>
@@ -466,18 +482,34 @@ def index():
     </script>
 </body>
 </html>
-    """, model_name=MODEL_PATH.stem)
+    """, model_name=model_name)
+
+
+@app.route('/fps')
+def fps():
+    """Statistiques du flux sur les deux dernières secondes."""
+    with lock:
+        now = time.monotonic()
+        while frame_times and now - frame_times[0] > 2:
+            frame_times.popleft()
+        count = len(frame_times)
+        elapsed = now - frame_times[0] if count else 0
+        return jsonify({
+            'fps': round((count - 1) / elapsed, 1) if count > 1 and elapsed > 0 else 0,
+            'objets': len(detections) if count else 0,
+        })
 
 
 @app.route('/set_model', methods=['POST'])
 def set_model():
     """Endpoint pour demander un changement de modèle."""
     global requested_model_name
-    data = request.get_json() or {}
-    selected = data.get('model')
+    data = request.get_json(silent=True)
+    selected = data.get('model') if isinstance(data, dict) else None
 
-    if selected in ALLOWED_MODELS:
-        requested_model_name = selected
+    if isinstance(selected, str) and selected in ALLOWED_MODELS:
+        with lock:
+            requested_model_name = selected
         return jsonify({'status': 'ok', 'model': selected})
     
     return jsonify({'status': 'error', 'message': 'Modèle non valide'}), 400
@@ -486,11 +518,12 @@ def set_model():
 @app.route('/model_status')
 def model_status():
     """Endpoint de suivi de l'état du modèle."""
-    return jsonify({
-        'active_model': active_model_name,
-        'requested_model': requested_model_name,
-        'is_loading': is_model_loading
-    })
+    with lock:
+        return jsonify({
+            'active_model': active_model_name,
+            'requested_model': requested_model_name,
+            'is_loading': is_model_loading
+        })
 
 
 @app.route('/video_feed')
