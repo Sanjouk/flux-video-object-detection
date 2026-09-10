@@ -6,7 +6,7 @@ import socket
 import errno
 
 # 1. Utilise l'IP directe pour tester d'abord si le flux passe
-TARGET_IP = "10.77.180.142"
+TARGET_IP = "10.25.2.87"
 PORT = 5000
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
@@ -18,7 +18,9 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 # macOS utilise par defaut un buffer UDP de seulement 9216 octets.
 # Un JPEG peut respecter la limite UDP et depasser quand meme ce buffer.
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
-max_frame_bytes = min(MAX_FRAME_BYTES, sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF))
+max_frame_bytes = min(
+    MAX_FRAME_BYTES, sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+)
 # Autorise le broadcast au cas ou TARGET_IP serait une adresse de diffusion (ex. 192.168.1.255).
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -63,7 +65,9 @@ while cap.isOpened():
         if e.errno == errno.EMSGSIZE:
             # Adapte les prochains JPEG si le chemin reseau impose une limite inferieure.
             max_frame_bytes = max(1, len(data) * 3 // 4)
-            print(f"Paquet trop grand ({len(data)} octets), limite JPEG réduite à {max_frame_bytes} octets.")
+            print(
+                f"Paquet trop grand ({len(data)} octets), limite JPEG réduite à {max_frame_bytes} octets."
+            )
         else:
             print(f"Erreur d'envoi : {e}")
 
