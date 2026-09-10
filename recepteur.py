@@ -436,6 +436,28 @@ def index():
             </div>
         </section>
 
+        <!-- CARTE 2 : FLUX FILTRÉ + YOLO -->
+            <section class="card">
+                <div class="card-header">
+                    <span>2. Flux Filtré + YOLO (<span data-active-model>{{ model_name }}</span>)</span>
+                    <span class="chip" style="border-color:var(--accent); color:var(--accent)">Traité</span>
+                </div>
+                <div class="video-wrap" id="wrap-filtered">
+                    <img id="stream-filtered" src="/video_feed_filtered" alt="Flux Filtré + YOLO" loading="eager" decoding="async"
+                         onload="document.getElementById('ph-filtered').hidden=true"
+                         onerror="document.getElementById('ph-filtered').hidden=false">
+                    <div class="overlay">
+                        <span class="chip rec">YOLO</span>
+                    </div>
+                    <div class="placeholder" id="ph-filtered">
+                        <div>
+                            <div class="spinner"></div>
+                            <div><strong>Connexion au flux filtré…</strong></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
         <div class="grid">
             <div class="panel">
                 <h3>Astuces d'affichage</h3>
@@ -588,10 +610,16 @@ def model_status():
         })
 
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_web_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route('/video_feed_raw')
+def video_feed_raw():
+    """Flux 1 : Image Brute direct UDP."""
+    return Response(generate_web_stream('raw'), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
+@app.route('/video_feed_filtered')
+def video_feed_filtered():
+    """Flux 2 : Image Filtrée avec pré-traitement + YOLO."""
+    return Response(generate_web_stream('filtered'), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     # 1. Préchargement et warmup du modèle par défaut au démarrage
